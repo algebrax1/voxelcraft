@@ -252,21 +252,25 @@
     font-family:var(--mc-font); font-size:10px; padding:5px 0; letter-spacing:.02em;
   }
   #chat-input::placeholder { color:#8a8a8a; }
-  #chatin.listening {
-    border-color:#ffd83a;
-    box-shadow: 0 0 0 2px rgba(255,216,58,.30), inset 2px 2px 0 rgba(255,255,255,.14), inset -2px -2px 0 rgba(0,0,0,.5);
+  /* voice: a small floating badge, never a text box */
+  #voicestate {
+    position:fixed; top:52px; left:50%; transform:translateX(-50%); z-index:12;
+    display:none; align-items:center; gap:9px;
+    background:rgba(0,0,0,.66); border:2px solid rgba(255,255,255,.16);
+    box-shadow: 0 0 0 2px rgba(0,0,0,.35);
+    padding:5px 13px; max-width:min(600px, 84vw);
+    font-size:9px; color:#fff; text-shadow:2px 2px 0 #000;
+    pointer-events:none; white-space:nowrap;
   }
-  #chatin.listening .prompt { color:#ff6a5a; animation:micPulse .7s ease-in-out infinite alternate; }
-  #mic-btn {
-    width:26px; height:26px; flex:none; cursor:pointer;
-    font-family:var(--mc-font); font-size:11px; line-height:1;
-    color:#cfcfcf; background:#4a4a4a; border:2px solid #000;
-    box-shadow: inset 1px 1px 0 #6f6f6f, inset -1px -1px 0 #2a2a2a;
-    display:flex; align-items:center; justify-content:center; padding:0;
+  #voicestate.show { display:flex; }
+  #voicestate .dot {
+    width:8px; height:8px; border-radius:50%; background:#e04a3a; flex:none;
+    box-shadow:0 0 6px rgba(224,74,58,.8);
+    animation:micPulse .7s ease-in-out infinite alternate;
   }
-  #mic-btn:hover { background:#5a5a5a; color:#fff; }
-  #mic-btn.on { background:#b8342a; color:#fff; animation:micPulse .7s ease-in-out infinite alternate; }
-  @keyframes micPulse { from { opacity:.55; } to { opacity:1; } }
+  #voicestate .txt { overflow:hidden; text-overflow:ellipsis; max-width:70vw; }
+  #voicestate .txt b { color:#ffd83a; font-weight:400; }
+  @keyframes micPulse { from { opacity:.45; } to { opacity:1; } }
 
   /* trade */
   .trade-panel { min-width:min(440px, 86vw); }
@@ -302,7 +306,8 @@
 <div id="crosshair"></div>
 <div id="label"></div>
 <div id="chat"></div>
-<div id="chatin"><span class="prompt">&gt;</span><input id="chat-input" type="text" maxlength="120" autocomplete="off" spellcheck="false" placeholder="Talk to Verity…"><button id="mic-btn" title="Talk to Verity (V)">&#9679;</button></div>
+<div id="voicestate"><span class="dot"></span><span class="txt">Listening…</span></div>
+<div id="chatin"><span class="prompt">&gt;</span><input id="chat-input" type="text" maxlength="120" autocomplete="off" spellcheck="false" placeholder="Talk to Verity…"></div>
 
 <div id="hudwrap">
   <canvas id="hudcanvas"></canvas>
@@ -3446,10 +3451,9 @@ function closeChat() {
   if (playing && !currentScreen && !player.dead) requestLock();
 }
 
-function submitChat() {
-  const t = chatInputEl.value.trim();
-  chatInputEl.value = '';
-  closeChat();
+/* send a message without needing the chat box (used by voice) */
+function sendToVerity(raw) {
+  const t = String(raw || '').trim();
   if (!t) return;
   chatLine('You', escapeHtml(t), 'you');
   if (typeof aiReady === 'function' && aiReady()) {
@@ -3462,6 +3466,13 @@ function submitChat() {
     if (r.expr) setExpression(r.expr, 3.2);
     if (typeof voiceSpeak === 'function') voiceSpeak(r.text);
   }, 350 + Math.random() * 250);
+}
+
+function submitChat() {
+  const t = chatInputEl.value.trim();
+  chatInputEl.value = '';
+  closeChat();
+  sendToVerity(t);
 }
 
 if (chatInputEl) {
@@ -4708,6 +4719,8 @@ function voiceStop() {
 
 /* ============================================================
    SPEECH RECOGNITION — microphone
+   Listens in the background: no chat box, no pointer-lock release,
+   so you can keep walking, mining and fighting while you talk.
    ============================================================ */
 let recog = null;
 let listening = false;
@@ -4717,77 +4730,12 @@ let voiceMicUsed = false;
 
 function voiceSupported() { return !!SRClass; }
 
-function voiceBuildRecog() {
-  if (!SRClass) return null;
-  const r = new SRClass();
-  r.lang = VOICE.lang;
-  r.interimResults = true;
-  r.continuous = false;
-  r.maxAlternatives = 1;
-
-  r.onstart = () => {
-    listening = true;
-    voiceErr = '';
-    voiceHeard = '';
-    voicePaint(true);
-  };
-
-  r.onresult = (e) => {
-    let interim = '', final = '';
-    for (let i = e.resultIndex; i < e.results.length; i++) {
-      const res = e.results[i];
-      if (res.isFinal) final += res[0].transcript;
-      else interim += res[0].transcript;
-    }
-    voiceHeard = (final || interim).trim();
-    if (chatInputEl) chatInputEl.value = voiceHeard;
-    if (final && final.trim()) {
-      // let the player see what was heard, then send it
-      setTimeout(() => { if (chatOpen) submitChat(); }, 220);
-    }
-  };
-
-  r.onerror = (e) => {
-    listening = false;
-    voicePaint(false);
-    const map = {
-      'not-allowed': 'Microphone blocked. Allow mic access for this page, or use the keyboard.',
-      'service-not-allowed': 'Speech service unavailable in this browser.',
-      'no-speech': 'I did not hear anything.',
-      'audio-capture': 'No microphone found.',
-      'network': 'Speech recognition needs a network connection.',
-      'aborted': ''
-    };
-    voiceErr = map[e.error] !== undefined ? map[e.error] : ('Voice error: ' + e.error);
-    if (voiceErr) {
-      toast(voiceErr);
-      chatLine('System', voiceErr, 'you');
-    }
-    if (chatInputEl) chatInputEl.placeholder = 'Talk to Verity\u2026';
-    if (chatOpen) chatInputEl && chatInputEl.focus();
-  };
-
-  r.onend = () => {
-    listening = false;
-    voicePaint(false);
-    if (chatInputEl) chatInputEl.placeholder = 'Talk to Verity\u2026';
-    if (chatOpen && chatInputEl && !voiceHeard) chatInputEl.focus();
-  };
-
-  return r;
-}
-
-function voicePaint(on) {
-  const bar = document.getElementById('chatin');
-  const btn = document.getElementById('mic-btn');
-  if (bar) bar.classList.toggle('listening', !!on);
-  if (btn) {
-    btn.classList.toggle('on', !!on);
-    btn.textContent = on ? '\u25CF' : '\u25CF';
-    btn.title = on ? 'Listening — press V to stop' : 'Talk to Verity (V)';
-  }
-  const st = document.getElementById('voice-status');
-  if (st) voiceUpdateStatus();
+function voiceBadge(text, show) {
+  const el = document.getElementById('voicestate');
+  if (!el) return;
+  el.classList.toggle('show', !!show);
+  const t = el.querySelector('.txt');
+  if (t && text !== undefined) t.innerHTML = text;
 }
 
 function voiceUpdateStatus() {
@@ -4801,10 +4749,74 @@ function voiceUpdateStatus() {
   st.className = 'ai-status ' + (voiceSupported() ? 'good' : 'warn');
 }
 
+function voiceBuildRecog() {
+  if (!SRClass) return null;
+  const r = new SRClass();
+  r.lang = VOICE.lang;
+  r.interimResults = true;
+  r.continuous = false;
+  r.maxAlternatives = 1;
+
+  r.onstart = () => {
+    listening = true;
+    voiceErr = '';
+    voiceHeard = '';
+    voiceBadge('Listening\u2026', true);
+  };
+
+  r.onresult = (e) => {
+    let interim = '', final = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const res = e.results[i];
+      if (res.isFinal) final += res[0].transcript;
+      else interim += res[0].transcript;
+    }
+    voiceHeard = (final || interim).trim();
+
+    if (final && final.trim()) {
+      // show what was heard for a beat, then send it — gameplay is untouched
+      voiceBadge('<b>' + escapeHtml(final.trim()) + '</b>', true);
+      const text = final.trim();
+      setTimeout(() => {
+        voiceBadge(undefined, false);
+        if (typeof sendToVerity === 'function') sendToVerity(text);
+      }, 260);
+      try { r.stop(); } catch (err) { }
+    } else {
+      voiceBadge(interim ? '<b>' + escapeHtml(interim) + '</b>' : 'Listening\u2026', true);
+    }
+  };
+
+  r.onerror = (e) => {
+    listening = false;
+    voiceBadge(undefined, false);
+    const map = {
+      'not-allowed': 'Microphone blocked. Allow mic access for this page, or press T to type.',
+      'service-not-allowed': 'Speech service unavailable in this browser.',
+      'no-speech': 'I did not hear anything.',
+      'audio-capture': 'No microphone found.',
+      'network': 'Speech recognition needs a network connection.',
+      'aborted': ''
+    };
+    voiceErr = map[e.error] !== undefined ? map[e.error] : ('Voice error: ' + e.error);
+    if (voiceErr) {
+      toast(voiceErr);
+      chatLine('System', voiceErr, 'you');
+    }
+  };
+
+  r.onend = () => {
+    listening = false;
+    voiceBadge(undefined, false);
+  };
+
+  return r;
+}
+
 function startVoice() {
   if (!voiceSupported()) {
     toast('Voice input needs Chrome or Edge');
-    chatLine('System', 'This browser has no speech recognition. Type to Verity instead.', 'you');
+    chatLine('System', 'This browser has no speech recognition. Press T to type to Verity instead.', 'you');
     return;
   }
   if (!VOICE.mic) {
@@ -4817,28 +4829,22 @@ function startVoice() {
   if (!recog) recog = voiceBuildRecog();
   if (!recog) return;
 
-  if (!chatOpen) openChat();
-  if (!voiceMicUsed) {
-    voiceMicUsed = true;
-    if (!('speechSynthesis' in window)) { /* no voice out */ }
-  }
-  chatInputEl.value = '';
-  chatInputEl.placeholder = 'Listening\u2026 speak now';
+  // deliberately does NOT open the chat box or release the mouse
+  voiceBadge('Listening\u2026', true);
   try {
     recog.start();
   } catch (e) {
-    // already running
     listening = false;
+    voiceBadge(undefined, false);
   }
 }
 
 function stopVoice() {
   if (recog && listening) {
-    try { recog.stop(); } catch (e) { }
+    try { recog.abort(); } catch (e) { }
   }
   listening = false;
-  voicePaint(false);
-  if (chatInputEl) chatInputEl.placeholder = 'Talk to Verity\u2026';
+  voiceBadge(undefined, false);
 }
 
 /* ---------------- settings buttons ---------------- */
@@ -4867,12 +4873,6 @@ function voiceInitSettings() {
 
   paint();
 }
-
-/* ---------------- mic button in the chat bar ---------------- */
-(function voiceBindMic() {
-  const btn = document.getElementById('mic-btn');
-  if (btn) btn.addEventListener('mousedown', e => { e.preventDefault(); startVoice(); });
-})();
 
 /* ==== 40-ui.js ==== */
 /* ============================================================
@@ -5977,6 +5977,7 @@ renderer.domElement.addEventListener('contextmenu', e => e.preventDefault());
 document.addEventListener('keydown', e => {
   if (typeof chatOpen !== 'undefined' && chatOpen) return;
   if (e.code === 'Escape') {
+    if (typeof listening !== 'undefined' && listening) { stopVoice(); return; }
     if (player.dead) return;
     if (currentScreen === 'inventory') { closeInventory(); return; }
     if (currentScreen === 'trade') { closeTrade(); return; }
@@ -5995,7 +5996,12 @@ document.addEventListener('keydown', e => {
   if (e.code === 'KeyF') { player.fly = !player.fly; player.vel.y = 0; toast(player.fly ? 'Fly mode ON' : 'Fly mode OFF'); }
   if (e.code === 'KeyE' || e.code === 'Tab') { e.preventDefault(); openInventory(); }
   if (e.code === 'KeyV') { e.preventDefault(); if (typeof startVoice === 'function') startVoice(); return; }
-  if (e.code === 'KeyT' || e.code === 'Enter') { e.preventDefault(); openChat(); return; }
+  if (e.code === 'KeyT' || e.code === 'Enter') {
+    e.preventDefault();
+    if (typeof listening !== 'undefined' && listening) stopVoice();
+    openChat();
+    return;
+  }
   if (e.code === 'KeyQ') dropSelected();
   if (e.code.startsWith('Digit')) {
     const n = parseInt(e.code.slice(5), 10);
@@ -6284,16 +6290,28 @@ function loop() {
 }
 
 /* ---------------- world creation ---------------- */
+function nearTree(x, z) {
+  for (let dx = -2; dx <= 2; dx++) {
+    for (let dz = -2; dz <= 2; dz++) {
+      if (treeAt(x + dx, z + dz)) return true;
+    }
+  }
+  return false;
+}
+
 function findSpawn() {
+  let fallback = null;
   for (let r = 0; r < 80; r++) {
     for (let i = 0; i < 14; i++) {
       const a = (i / 14) * Math.PI * 2;
       const x = Math.round(Math.cos(a) * r), z = Math.round(Math.sin(a) * r);
       const h = heightAt(x, z);
-      if (h > SEA + 2 && h < 34) return { x: x + 0.5, y: h + 1.05, z: z + 0.5 };
+      if (h <= SEA + 2 || h >= 34) continue;
+      if (!fallback) fallback = { x: x + 0.5, y: h + 1.05, z: z + 0.5 };
+      if (!nearTree(x, z)) return { x: x + 0.5, y: h + 1.05, z: z + 0.5 };
     }
   }
-  return { x: 0.5, y: SEA + 6, z: 0.5 };
+  return fallback || { x: 0.5, y: SEA + 6, z: 0.5 };
 }
 
 function parseSeed(s) {
@@ -6332,9 +6350,9 @@ function newWorld(seedStr) {
   getChunk(Math.floor(sp.x / 16), Math.floor(sp.z / 16));
   // clear any tree that spawned on top of us
   const sx = Math.floor(sp.x), sy = Math.floor(sp.y), sz = Math.floor(sp.z);
-  for (let dx = -2; dx <= 2; dx++) {
-    for (let dz = -2; dz <= 2; dz++) {
-      for (let dy = 0; dy < 3; dy++) {
+  for (let dx = -3; dx <= 3; dx++) {
+    for (let dz = -3; dz <= 3; dz++) {
+      for (let dy = 0; dy < 4; dy++) {
         const b = getBlock(sx + dx, sy + dy, sz + dz);
         if (b === LEAVES || b === LOG) setBlock(sx + dx, sy + dy, sz + dz, AIR);
       }
